@@ -7,13 +7,13 @@
 #   "python-dotenv",
 #   "pytesseract",
 #   "tesseract",
-#   "opencv-python",
 #   "numpy",
 #   "pillow",
 #   "scikit-learn",
+#   "textwrap3",
 # ]
 # ///
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import os
@@ -23,11 +23,11 @@ from dotenv import load_dotenv
 import tempfile
 import pytesseract
 from PIL import Image
-import cv2
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 # from sentence_transformers import SentenceTransformer
+import textwrap
 
 
 app = FastAPI()
@@ -125,10 +125,11 @@ def run_task(task: str):
 You are an assistant responsible for executing tasks.
 - If a script URL is provided, use script_runner.
 - Otherwise, use task_runner to generate a self-contained Python script that: 
-  - Handles all edge cases relevant to the task.
   - Includes necessary imports and follows best practices.
   - Determines the base directory dynamically using os.getcwd().
   - Constructs all file paths with os.path.join() for cross-platform compatibility
+  - If the task is count number of particular day from dates. Don't restrict with one date format. Use all date formats.
+  - For reading the credit card number, don't write all numbers in image but only in same line with 16 digits. Don't use cv2
 """
             }
         ],
@@ -143,30 +144,33 @@ You are an assistant responsible for executing tasks.
         email = arguments['args'][0]
 
         # Extract script filename from URL (e.g., datagen.py)
-        script_name = script_url.split("/")[-1]
+        # script_name = script_url.split("/")[-1]
 
-        # Use curl to download the script
-        curl_command = f"curl -o {script_name} {script_url}"
-        subprocess.run(curl_command, shell=True, check=True)
-        with open(script_name, "r") as f:
-            content = f.read().replace("/data", "./data")
+        # # Use curl to download the script
+        # curl_command = f"curl -o {script_name} {script_url}"
+        # subprocess.run(curl_command, shell=True, check=True)
+        # with open(script_name, "r") as f:
+        #     content = f.read().replace("/data", "./data")
 
-        with open(script_name, "w") as f:
-            f.write(content)
+        # with open(script_name, "w") as f:
+        #     f.write(content)
 
         # Run the downloaded script using uv
-        command = ["uv", "run", script_name, email]
+        command = ["uv", "run", script_url, email]
         subprocess.run(command)
 
-        return {"message": f"Script {script_name} executed successfully with argument {email}"}
+        return {"message": f"Script {script_url} executed successfully with argument {email}"}
 
     elif response.json()['choices'][0]['message']['tool_calls'][0]['function']['name'] == "task_runner":
         # return response.json()
         arguments = json.loads(response.json()['choices'][0]['message']['tool_calls'][0]['function']['arguments'])
         task = arguments['task']
-        print(task)
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as temp_script:
-            temp_script.write(task)
+        formatted_task = textwrap.dedent(task).strip()
+        if any(forbidden in formatted_task for forbidden in ["/etc/", "/home/", "/Users/", "/var/", "/bin/"]):
+            raise HTTPException(status_code=403, detail="Unauthorized file access attempt")
+        print(formatted_task)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", encoding="utf-8", delete=False) as temp_script:
+            temp_script.write(formatted_task)
             temp_script_path = temp_script.name
 
         try:
