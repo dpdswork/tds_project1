@@ -11,6 +11,7 @@
 #   "pillow",
 #   "scikit-learn",
 #   "textwrap3",
+#   "uuid",
 # ]
 # ///
 from fastapi import FastAPI, HTTPException
@@ -28,10 +29,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 # from sentence_transformers import SentenceTransformer
 import textwrap
+import uuid
 
 
 app = FastAPI()
 load_dotenv()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,7 +43,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 AIPROXY_TOKEN = os.getenv("AIPROXY_TOKEN")
-# print(AIPROXY_TOKEN)
+
 tools=[
     {
         "type":"function",
@@ -122,14 +125,22 @@ def run_task(task: str):
             {
                 "role":"system",
                 "content":"""
-You are an assistant responsible for executing tasks.
-- If a script URL is provided, use script_runner.
-- Otherwise, use task_runner to generate a self-contained Python script that: 
-  - Includes necessary imports and follows best practices.
-  - Determines the base directory dynamically using os.getcwd().
-  - Constructs all file paths with os.path.join() for cross-platform compatibility
-  - If the task is count number of particular day from dates. Don't restrict with one date format. Use all date formats.
-  - For reading the credit card number, don't write all numbers in image but only in same line with 16 digits. Don't use cv2
+You are an assistant responsible for executing tasks efficiently and securely.
+-If a script URL is provided, use script_runner to download and execute the script.
+-Otherwise, use task_runner to generate a self-contained Python script that:
+    -Includes necessary imports and follows best coding practices.
+    -Determines the base directory dynamically using os.getcwd().
+    -Constructs all file paths using os.path.join() to ensure cross-platform compatibility.
+    -If the task involves counting occurrences of a particular weekday from dates, support multiple date formats, ensuring flexibility in parsing.
+    -If the task involves extracting a credit card number from an image, only extract 16-digit numbers found on the same line, without using cv2.
+    -Ensures all required dependencies are installed. If a module is missing, install it dynamically using:
+    try:
+        import some_module
+    except ImportError:
+        import subprocess
+        subprocess.run(["pip", "install", "some_module"], check=True)
+        import some_module
+    -If the task involves extracting an email ID from a text file containing email content, do not extract the first email found. Instead, identify and extract the specific email ID mentioned in the task.
 """
             }
         ],
@@ -137,23 +148,32 @@ You are an assistant responsible for executing tasks.
         "tool_choice":"auto"
     }
     response = requests.post(url=url, headers=headers, json=data)
-    # return response.json()['choices'][0]['message']['tool_calls'][0]['function']['name']
+    # print("Status Code:", response.status_code)
+    # print("Response Text:", response.text)
+    # # return response.json()['choices'][0]['message']['tool_calls'][0]['function']['name']
+    # print(response.json())
     if response.json()['choices'][0]['message']['tool_calls'][0]['function']['name'] == "script_runner":
         arguments = json.loads(response.json()['choices'][0]['message']['tool_calls'][0]['function']['arguments'])
         script_url = arguments['script_url']
         email = arguments['args'][0]
 
         # Extract script filename from URL (e.g., datagen.py)
-        # script_name = script_url.split("/")[-1]
+        script_name = script_url.split("/")[-1]
+        # print (script_name)
+        # Use curl to download the script
+        curl_command = f"curl -o {script_name} {script_url}"
+        subprocess.run(curl_command, shell=True, check=True)
+        data_dir = "./data"
+        os.makedirs(data_dir, exist_ok=True)
+        os.chmod(data_dir, 0o777)
 
-        # # Use curl to download the script
-        # curl_command = f"curl -o {script_name} {script_url}"
-        # subprocess.run(curl_command, shell=True, check=True)
-        # with open(script_name, "r") as f:
-        #     content = f.read().replace("/data", "./data")
+        with open(script_name, "r") as f:
+            content = f.read()
+        content = content.replace('"/data"', '"./data"').replace("'/data'", "'./data'").replace("/data", "./data")
+        
 
-        # with open(script_name, "w") as f:
-        #     f.write(content)
+        with open(script_name, "w") as f:
+            f.write(content)
 
         # Run the downloaded script using uv
         command = ["uv", "run", script_url, email]
@@ -168,18 +188,17 @@ You are an assistant responsible for executing tasks.
         formatted_task = textwrap.dedent(task).strip()
         if any(forbidden in formatted_task for forbidden in ["/etc/", "/home/", "/Users/", "/var/", "/bin/"]):
             raise HTTPException(status_code=403, detail="Unauthorized file access attempt")
-        print(formatted_task)
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", encoding="utf-8", delete=False) as temp_script:
+        # print(formatted_task)
+        temp_script_path = os.path.join(tempfile.gettempdir(), f"task_{uuid.uuid4().hex}.py")
+        with open(temp_script_path, "w", encoding="utf-8") as temp_script:
             temp_script.write(formatted_task)
-            temp_script_path = temp_script.name
 
         try:
         # Run the script using uv
             command = ["uv", "run", temp_script_path]
             subprocess.run(command, check=True)
-        finally:
-        # Remove the temporary file after execution
-            os.remove(temp_script_path)
+        except Exception as e:
+            return {"error": str(e)}, 500
         return {"message": f"Task {task} executed successfully"}
     else:
         return {"message": "Task not supported"}, 400
